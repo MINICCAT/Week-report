@@ -3,7 +3,7 @@
 
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
-
+# 图像编码先去看前向传播的过程，一步步往后看
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -15,9 +15,9 @@ from .common import LayerNorm2d, MLPBlock
 class ImageEncoderViT(nn.Module):
     def __init__(
         self,
-        img_size: int = 1024,  # 输入图像的大小
-        patch_size: int = 16,  # 将图像分割成的小块大小
-        in_chans: int = 3,  # 输入图像的通道数
+        img_size: int = 1024,  # 输入图像的大小，默认是1024*1024
+        patch_size: int = 16,  # 将图像分割成的小块大小，每小块是16*16
+        in_chans: int = 3,  # 输入图像的通道数，组合patch_size这个参数就得到，16*16*3的图像块
         embed_dim: int = 768,  # 嵌入向量的维度，即Transformer的输入维度，通常为768
         depth: int = 12,  # Transformer编码器的深度，要用几个transformer block，类似于重复几次
         num_heads: int = 12,  # 在每个Vit block中多头注意力机制中的头数
@@ -31,11 +31,16 @@ class ImageEncoderViT(nn.Module):
         rel_pos_zero_init: bool = True,  # 是否零初始化相对位置参数
         window_size: int = 0,  # 窗口注意力块的窗口大小
         global_attn_indexes: Tuple[int, ...] = (),  # 使用全局注意力的块索引
+
+        # global_attn_indexes: Tuple[int, ...] = () 这句的语法是变量是元组类型的，元组中可以包含多个int整形，比如(1,2,3)这种形式
+
+
     ) -> None:
         
         super().__init__()
         self.img_size = img_size
 
+        # 第一步，将图像分割成patch小补丁，并嵌入到向量空间中
         self.patch_embed = PatchEmbed(
             kernel_size=(patch_size, patch_size), #解释：将图像分割成patch时，卷积核的大小
             stride=(patch_size, patch_size), #解释：将图像分割成patch时，每次移动的步长
@@ -43,10 +48,13 @@ class ImageEncoderViT(nn.Module):
             embed_dim=embed_dim, #解释：嵌入向量的维度，即输出的维度
         )
 
+        # 第二步，位置编码
         self.pos_embed: Optional[nn.Parameter] = None #解释：绝对位置编码
         if use_abs_pos: # 初始化绝对位置编码，默认都为0，并且他的形状是使用预训练图像大小
-            self.pos_embed = nn.Parameter(  torch.zeros(1, img_size // patch_size, img_size // patch_size, embed_dim)   )
+            self.pos_embed = nn.Parameter( torch.zeros(1, img_size // patch_size, img_size // patch_size, embed_dim)   )
+            # 上面这个是创建了一个形状为（1,64,64,768）的全0张量，作为绝对位置编码
 
+        # 第三步，Transformer编码器
         self.blocks = nn.ModuleList()
         for i in range(depth):
             block = Block(
@@ -88,20 +96,26 @@ class Block(nn.Module): # 这个block就是手搓Transformer块，支持窗口�
 
     def __init__(
         self, #初始化函数，用于创建ViT块的各个组件
-        dim: int,  # 输入通道的数量
+        dim: int,  # 输入通道的数量，768
         num_heads: int,  # 每个ViT块中注意力头的数量
         mlp_ratio: float = 4.0,  # MLP隐藏层维度与嵌入维度的比例
         qkv_bias: bool = True,  # 是否在查询、键、值中添加可学习的偏置
         norm_layer: Type[nn.Module] = nn.LayerNorm,  # 归一化层
+
+        # Type这语法是该参数需要接收的是一个类（类对象），而不是这个类创建出来的实例对象。
+
         act_layer: Type[nn.Module] = nn.GELU,  # 激活层
         use_rel_pos: bool = False,  # 是否在注意力图中添加相对位置嵌入
         rel_pos_zero_init: bool = True,  # 是否将相对位置参数初始化为零
         window_size: int = 0,  # 窗口注意力块的窗口大小，如果为0则使用全局注意力
         input_size: Optional[Tuple[int, int]] = None,  # 输入分辨率，用于计算相对位置参数大小，只有在使用相对位置时才启用
+
+        # input_size: Optional[Tuple[int, int]] = None #optional这个语法是，这个变量可以为空，因为是设定相对位置之后就才启用。也可以是元组类型，元组中包含两个int整形，比如(1,2)这种形式
+
     ) -> None:
         
         super().__init__()
-        self.norm1 = norm_layer(dim)
+        self.norm1 = norm_layer(dim) #768，解释：第一个标准化层，用于对输入进行标准化处理
         self.attn = Attention(
             dim,
             num_heads=num_heads,
@@ -117,15 +131,15 @@ class Block(nn.Module): # 这个block就是手搓Transformer块，支持窗口�
         self.window_size = window_size
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        shortcut = x
+        shortcut = x  #残差连接用的，需要存储一开始的x
         x = self.norm1(x)
-        # Window partition
+        # 划分窗口，将输入张量分割成多个窗口，以便在窗口内进行局部计算
         if self.window_size > 0:
             H, W = x.shape[1], x.shape[2]
             x, pad_hw = window_partition(x, self.window_size)
 
         x = self.attn(x)
-        # Reverse window partition
+        # 恢复划分的窗口，将窗口重新组合成原始的输入张量
         if self.window_size > 0:
             x = window_unpartition(x, self.window_size, pad_hw, (H, W))
 
@@ -147,9 +161,10 @@ class Attention(nn.Module): #这个类是多头注意力机制的模块，并且
     ) -> None:
 
         super().__init__() #调用父类 nn.Module的构造函数，这是必须的步骤
+        # 下面这些self中的内容并没有具体去执行，只是罗列一下所需的函数和参数，强制记忆就行
         self.num_heads = num_heads # 8
         head_dim = dim // num_heads # 768 // 8 = 96
-        self.scale = head_dim**-0.5 # 1 / sqrt(96) = 0.099503617
+        self.scale = head_dim**-0.5 # QK的缩放因子 1 / sqrt(96) = 0.099503617
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias) #这是一个线性层（全连接层），它会一次性生成查询（Query）、键（Key）和值（Value）三个矩阵。因为是dim * 3，所以它的输出大小是原始维度的三倍
         self.proj = nn.Linear(dim, dim) #这是最终的线性投影层，用于将多头注意力的输出整合回原始维度。
@@ -164,18 +179,17 @@ class Attention(nn.Module): #这个类是多头注意力机制的模块，并且
             self.rel_pos_h = nn.Parameter(torch.zeros(2 * input_size[0] - 1, head_dim))
             self.rel_pos_w = nn.Parameter(torch.zeros(2 * input_size[1] - 1, head_dim))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor: #输入是张量 x，输出也是张量
+    def forward(self, x: torch.Tensor) -> torch.Tensor: #输入是张量 x，输出也是张量（25,14,14,768）
         B, H, W, _ = x.shape #获取输入张量 x的维度，分别代表批大小（B）、高度（H）、宽度（W）。_表示最后一个维度（特征维度），我们不需要显式使用它的值。
         
         # 这里是核心步骤，需要谨记
-        # qkv with shape (3, B, nHead, H * W, C)
-        # self.qkv(x)通过线性层得到Q、K、V的合并结果。
-        # .reshape(...)将输出重塑，为分割多头做准备。
-        # .permute(...)调整维度的顺序，使得Q、K、V分离，并便于后续计算
+        # qkv(x)相当于用线性层，把最后一个形状变成3*dim，此时的形状是(B, H, W, 3 * 768)
+        # .reshape(...)先合并H,W,再新增一个维度3,再新增一个维度，代表注意力头的数量，最后-1是让他自己计算剩余维度，此时形状 (B, 196, 3, 8, 96)
+        # .permute(...)调整维度的顺序
         qkv = self.qkv(x).reshape(B, H * W, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
         
-        # q, k, v = qkv.reshape(3, B * self.num_heads, H * W, -1).unbind(0)：最后将张量重新变形并拆分成查询（q）、键（k）、值（v）三个独立的张量。
-        # q, k, v with shape (B * nHead, H * W, C)
+        # 下面这个代码很关键，最后将张量重新变形并拆分成查询（q）、键（k）、值（v）三个独立的张量。
+        # 每个的形状都是 (B * nHead, H * W, C),即(200, 196, 96)
         q, k, v = qkv.reshape(3, B * self.num_heads, H * W, -1).unbind(0)
 
         # 这里就用上了数学公式，q乘缩放因子 ，再与K的转置相乘
@@ -193,25 +207,27 @@ class Attention(nn.Module): #这个类是多头注意力机制的模块，并且
 
 def window_partition(x: torch.Tensor, window_size: int) -> Tuple[torch.Tensor, Tuple[int, int]]:
     """
-    Partition into non-overlapping windows with padding if needed.
+    根据需要，使用填充将数据划分为非重叠窗口。在这个项目中窗口大小设置成了144，所以每个窗口的大小是14x14。
     Args:
-        x (tensor): input tokens with [B, H, W, C].
-        window_size (int): window size.
+        x (tensor): 具有[B, H, W, C]维度的输入标记
+        window_size (int): 窗口大小
 
     Returns:
-        windows: windows after partition with [B * num_windows, window_size, window_size, C].
-        (Hp, Wp): padded height and width before partition
+        窗口：经过分区后的窗口，形状为[B * num_windows, window_size, window_size, C]。即[B*25, 14, 14, 768]
     """
     B, H, W, C = x.shape
-
-    pad_h = (window_size - H % window_size) % window_size
-    pad_w = (window_size - W % window_size) % window_size
+    # 下面的pad_h和pad_w是计算需要填充的行和列的数量，以确保输入张量可以被窗口大小整除。
+    pad_h = (window_size - H % window_size) % window_size # 6
+    pad_w = (window_size - W % window_size) % window_size # 6
     if pad_h > 0 or pad_w > 0:
-        x = F.pad(x, (0, 0, 0, pad_w, 0, pad_h))
+        # 如果需要填充，则使用F.pad函数在输入张量的底部和右侧添加填充0。
+        x = F.pad(x, (0, 0, 0, pad_w, 0, pad_h))#
     Hp, Wp = H + pad_h, W + pad_w
-
+    #view用于改变张量的形状（维度大小），但不改变数据本身和数据顺序。新形状的元素总数必须与原张量一致，x.view将填充后的张量（形状为 (B, Hp, Wp, C)）重塑为6D（B，5,14,5,14，768）
+    #x.permute(0, 1, 3, 2, 4, 5)将6D张量的维度从 (B, H_blocks, H_win, W_blocks, W_win, C)重新排列为 (B, H_blocks, W_blocks, H_win, W_win, C)。目的：将同一窗口的块索引（H_blocks和 W_blocks）集中在前，窗口内部细节（H_win和 W_win）在后，便于后续展平为独立的窗口
+    #.contiguous()确保张量在内存中连续存储（内存布局无间隔），这是 view操作的先决条件
     x = x.view(B, Hp // window_size, window_size, Wp // window_size, window_size, C)
-    windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size, window_size, C)
+    windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size, window_size, C) #即[B*25, 14, 14, 768]
     return windows, (Hp, Wp)
 
 
@@ -219,12 +235,12 @@ def window_unpartition(
     windows: torch.Tensor, window_size: int, pad_hw: Tuple[int, int], hw: Tuple[int, int]
 ) -> torch.Tensor:
     """
-    Window unpartition into original sequences and removing padding.
+    将分块处理后的窗口特征图恢复到原始的空间布局
     Args:
-        windows (tensor): input tokens with [B * num_windows, window_size, window_size, C].
+        windows (tensor): 输入划分后的窗口 [B * num_windows, window_size, window_size, C].
         window_size (int): window size.
-        pad_hw (Tuple): padded height and width (Hp, Wp).
-        hw (Tuple): original height and width (H, W) before padding.
+        pad_hw (Tuple): 输入填充的宽高值 (Hp, Wp).
+        hw (Tuple): 在填充之前的原始宽高.
 
     Returns:
         x: unpartitioned sequences with [B, H, W, C].
@@ -327,7 +343,7 @@ class PatchEmbed(nn.Module):
     ) -> None:
         super().__init__()
 
-        self.proj = nn.Conv2d(  in_chans, embed_dim, kernel_size=kernel_size, stride=stride, padding=padding    )
+        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=kernel_size, stride=stride, padding=padding)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.proj(x)
